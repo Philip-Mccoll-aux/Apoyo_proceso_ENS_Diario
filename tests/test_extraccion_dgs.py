@@ -88,6 +88,31 @@ def test_generadores_y_cargas_conectados_a_su_barra(tmp_path):
     assert cargas == {"4": 80, "3": 120}
 
 
+def test_coordenadas_cero_se_tratan_como_dato_faltante(tmp_path):
+    texto = """\
+$$ElmTerm;ID(a:15);loc_name(a:40);fold_id(p);outserv(i);uknom(r);GPSlat(r);GPSlon(r)
+  1;ConSubestacionReal;S1;0;110;0;0
+  2;SinCoordenadas;S2;0;110;0;0
+  3;ConCoordenadaPropia;;0;110;-20.5;-70.1
+$$ElmSubstat;ID(a:15);loc_name(a:40);fold_id(p);GPSlat(r);GPSlon(r)
+  S1;Subestacion Real;;-33.5;-70.6
+  S2;Subestacion Sin Datos;;0;0
+"""
+    ruta = tmp_path / "coordenadas.dgs"
+    ruta.write_text(texto, encoding="utf-8")
+    bloques = leer_bloques_dgs(str(ruta))
+    modelo = dgs_a_modelo(bloques, CONFIG)
+    barras = {b.nombre: b for b in modelo.barras}
+
+    assert barras["ConSubestacionReal"].tiene_coordenadas
+    assert math.isclose(barras["ConSubestacionReal"].lat, -33.5)
+
+    assert not barras["SinCoordenadas"].tiene_coordenadas  # ni la barra ni su subestacion tienen datos reales
+
+    assert barras["ConCoordenadaPropia"].tiene_coordenadas
+    assert math.isclose(barras["ConCoordenadaPropia"].lat, -20.5)
+
+
 def test_pipeline_completo_genera_todas_las_hojas(tmp_path):
     modelo = _modelo_de_prueba(tmp_path)
     hojas = analisis.generar_todas_las_hojas(modelo, CONFIG)

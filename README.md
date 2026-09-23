@@ -125,9 +125,22 @@ pytest
   atributos de usuario), agréguelos a `atributos_lat`/`atributos_lon` en
   `config.py`. Si usa la Opción 1 (DGS), además debe seleccionar esos campos
   al armar la definición de exportación en PowerFactory — DGS solo exporta
-  las columnas que uno elige incluir por clase.
+  las columnas que uno elige incluir por clase. `(0, 0)` se trata como "sin
+  coordenada" (es el valor por defecto/sin inicializar de ese campo en
+  PowerFactory, no una ubicación real), y si la barra no tiene coordenada
+  propia se usa la de su subestación contenedora como respaldo. En modelos
+  reales grandes es común que solo una fracción de las barras termine con
+  coordenada resuelta (las que sí tienen datos propios, o cuya subestación
+  los tiene) — la fila "Barras con coordenadas GPS" de la hoja `Resumen`
+  dice cuántas se pudieron ubicar. Dos barras de la misma subestación que
+  ambas caen al respaldo van a aparecer a "0 km" de distancia entre sí: es
+  esperado (comparten la ubicación de la subestación), no un error.
 - **Zona/Área**: se busca en `cpZone`/`cpArea`; ajuste `config.py` si su
-  modelo usa una convención distinta.
+  modelo usa una convención distinta. Si su definición de exportación DGS no
+  incluye esos campos para `ElmTerm`/`ElmLod`/`ElmSym`/`ElmGenstat` (es
+  común que no vengan por defecto), la hoja `Zonas_Areas` va a salir
+  agrupada toda bajo "(sin zona)/(sin área)" — agréguelos a la definición si
+  quiere ese desglose.
 - Los transformadores de 3 devanados se representan internamente como 3
   ramas hacia un nodo "estrella" ficticio, igual que hace PowerFactory.
 
@@ -138,3 +151,34 @@ defecto, si el sistema supera `umbral_matriz_completa` barras (200 por
 defecto), las hojas de adyacencia y de distancias pasan automáticamente a un
 formato de "top-N vecinos más cercanos" (`num_vecinos_cercanos`, 10 por
 defecto) en vez de la matriz completa.
+
+## Rendimiento en redes grandes (miles de barras)
+
+Varios cálculos sobre el grafo completo (centralidad de intermediación,
+distancia eléctrica y correlaciones "todos contra todos") son inherentemente
+costosos en redes con miles de barras — una red nacional completa puede
+tener decenas de miles. Por encima de `umbral_analisis_pesado` (3000 barras
+por defecto), el script deja de ser exhaustivo automáticamente:
+
+- **Centralidad de intermediación**: se estima sobre una muestra aleatoria
+  de `tamano_muestra_redes_grandes` barras en vez de recorrerlas todas
+  (columna `intermediacion_es_aproximada` marca cuándo aplica). La
+  centralidad de cercanía se omite por completo en ese caso (queda `None`):
+  no tiene un atajo de muestreo posible y calcularla exacta puede tardar
+  horas en una red de decenas de miles de barras.
+- **Distancia eléctrica** (hoja `Distancia_Electrica`): se calcula solo
+  desde una muestra de barras en vez de desde todas (columna
+  `calculado_sobre_muestra`).
+- **Correlaciones estadísticas**: se calculan sobre una muestra de barras
+  con GPS en vez de sobre todas — no hace falta ser exhaustivo para que una
+  correlación sea representativa.
+- **Elementos críticos N-1**: no se ve afectado por este umbral — se calcula
+  siempre de forma exacta y completa (usa un algoritmo de "bridges" que es
+  rápido incluso en redes grandes).
+- **Cercanía geográfica**: tampoco se ve afectada — usa un árbol espacial
+  (KD-tree) en vez de comparar todos los pares, así que siempre es exacta y
+  rápida sin necesidad de muestrear.
+
+En una red real de ~19.600 barras y ~22.300 elementos (probado con un
+export DGS completo de un sistema eléctrico nacional), el script completo
+corre en aproximadamente un minuto.

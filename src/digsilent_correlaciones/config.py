@@ -32,6 +32,21 @@ CONFIG = {
     # Número de vecinos más cercanos a listar cuando se supera el umbral.
     "num_vecinos_cercanos": 10,
 
+    # Por encima de este número de barras, los cálculos "todos contra todos"
+    # sobre el grafo (distancia eléctrica, correlaciones, centralidad de
+    # intermediación) dejan de ser exactos y pasan a estimarse sobre una
+    # muestra aleatoria de nodos, para que el tiempo de cómputo no crezca
+    # sin límite con el tamaño de la red (una red nacional puede tener
+    # decenas de miles de barras). La cercanía geográfica no se ve afectada:
+    # se calcula siempre de forma exacta con un árbol espacial (KD-tree).
+    "umbral_analisis_pesado": 3000,
+
+    # Cuántos nodos muestrear cuando se supera "umbral_analisis_pesado".
+    "tamano_muestra_redes_grandes": 500,
+
+    # Semilla para que el muestreo aleatorio sea reproducible.
+    "semilla_muestreo": 42,
+
     # Atributo usado como peso de "distancia eléctrica": "longitud_km" o
     # "x_ohm". Si el elemento no tiene el atributo elegido, se usa 1.0 como
     # respaldo (equivalente a contar saltos).

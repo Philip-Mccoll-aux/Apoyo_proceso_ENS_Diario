@@ -37,6 +37,18 @@ def _valor(fila, columna, default=None):
     return fila[columna]
 
 
+def _coordenada_vacia(lat, lon) -> bool:
+    """(0, 0) es el valor por defecto/sin-inicializar de GPSlat/GPSlon en DGS,
+    no una ubicación real (Null Island) — hay que tratarlo como dato faltante,
+    igual que None."""
+    if lat is None or lon is None:
+        return True
+    try:
+        return float(lat) == 0.0 and float(lon) == 0.0
+    except (TypeError, ValueError):
+        return True
+
+
 def _en_servicio(fila) -> bool:
     if "outserv" in fila.index and not pd.isna(fila["outserv"]):
         return int(fila["outserv"]) == 0
@@ -107,10 +119,14 @@ def dgs_a_modelo(bloques: dict[str, pd.DataFrame], config: dict, nombre_proyecto
             id_barra = str(fila[columna_id(terminales)])
             lat = _buscar_atributo(fila, config["atributos_lat"])
             lon = _buscar_atributo(fila, config["atributos_lon"])
-            if (lat is None or lon is None) and str(_valor(fila, "fold_id")) in subestaciones:
+            if _coordenada_vacia(lat, lon) and str(_valor(fila, "fold_id")) in subestaciones:
                 subestacion = subestaciones[str(_valor(fila, "fold_id"))]
-                lat = lat if lat is not None else _buscar_atributo(subestacion, config["atributos_lat"])
-                lon = lon if lon is not None else _buscar_atributo(subestacion, config["atributos_lon"])
+                lat_sub = _buscar_atributo(subestacion, config["atributos_lat"])
+                lon_sub = _buscar_atributo(subestacion, config["atributos_lon"])
+                if not _coordenada_vacia(lat_sub, lon_sub):
+                    lat, lon = lat_sub, lon_sub
+            if _coordenada_vacia(lat, lon):
+                lat = lon = None
             modelo.barras.append(
                 Barra(
                     id=id_barra,

@@ -5,12 +5,14 @@ se puede probar con datos sintéticos (ver tests/test_analisis.py).
 """
 from __future__ import annotations
 
+import random
 from math import asin, cos, radians, sin, sqrt
 from typing import Optional
 
 import networkx as nx
 import numpy as np
 import pandas as pd
+from scipy.spatial import cKDTree
 
 from .modelo import ModeloRed
 
@@ -143,18 +145,26 @@ def hoja_cercania_geografica(
                 datos[i, j] = datos[j, i] = d
         return pd.DataFrame(datos, index=nombres, columns=nombres).round(3)
 
-    # Modelo grande: en vez de una matriz N x N, listamos los k vecinos más
-    # cercanos de cada barra (más útil y liviano de todas formas).
+    # Modelo grande: comparar todos los pares es O(N^2) e impracticable con
+    # miles de barras (una red nacional puede tener decenas de miles). En vez
+    # de eso, se usa un árbol espacial (KD-tree) sobre una proyección plana
+    # local aproximada para encontrar candidatos en O(N log N); la distancia
+    # que se reporta es siempre la haversine exacta entre esos candidatos, la
+    # proyección solo se usa para elegir quiénes son "cercanos".
+    lat_media = radians(sum(b.lat for b in barras_geo) / len(barras_geo))
+    coordenadas = np.array([(b.lon * cos(lat_media), b.lat) for b in barras_geo])
+    arbol = cKDTree(coordenadas)
+    k = min(num_vecinos + 1, len(barras_geo))  # +1: el punto es su propio vecino más cercano
+    _, indices_vecinos = arbol.query(coordenadas, k=k)
+
     filas = []
-    for i, origen in enumerate(barras_geo):
-        distancias = []
-        for j, destino in enumerate(barras_geo):
-            if i == j:
+    for i, vecinos in enumerate(np.atleast_2d(indices_vecinos)):
+        origen = barras_geo[i]
+        for j in vecinos:
+            if j == i:
                 continue
+            destino = barras_geo[j]
             d = distancia_haversine_km(origen.lat, origen.lon, destino.lat, destino.lon)
-            distancias.append((destino, d))
-        distancias.sort(key=lambda x: x[1])
-        for destino, d in distancias[:num_vecinos]:
             filas.append(
                 {
                     "barra": origen.nombre,
@@ -166,7 +176,13 @@ def hoja_cercania_geografica(
 
 
 def hoja_distancia_electrica(
-    grafo: nx.MultiGraph, peso: str, umbral: int, num_vecinos: int
+    grafo: nx.MultiGraph,
+    peso: str,
+    umbral: int,
+    num_vecinos: int,
+    umbral_pesado: int = 3000,
+    tamano_muestra: int = 500,
+    semilla: int = 42,
 ) -> Optional[pd.DataFrame]:
     if grafo.number_of_nodes() == 0:
         return None
@@ -191,8 +207,20 @@ def hoja_distancia_electrica(
         matriz = matriz.rename(index=nombres, columns=nombres)
         return matriz.round(3)
 
+    # Calcular la ruta más corta desde CADA barra (todos contra todos) es
+    # O(N * E log N): impracticable con miles de barras. Si la red supera
+    # "umbral_pesado", se calcula solo desde una muestra aleatoria de barras
+    # en vez de desde todas, dejando explícito que es una muestra.
+    if n <= umbral_pesado:
+        origenes = list(simple.nodes())
+        es_muestra = False
+    else:
+        origenes = random.Random(semilla).sample(list(simple.nodes()), min(tamano_muestra, n))
+        es_muestra = True
+
     filas = []
-    for origen, distancias in nx.all_pairs_dijkstra_path_length(simple, weight="weight"):
+    for origen in origenes:
+        distancias = nx.single_source_dijkstra_path_length(simple, origen, weight="weight")
         ordenados = sorted(distancias.items(), key=lambda x: x[1])
         contador = 0
         for destino, d in ordenados:
@@ -203,6 +231,7 @@ def hoja_distancia_electrica(
                     "barra": nombres[origen],
                     "barra_electricamente_cercana": nombres[destino],
                     f"distancia_electrica_{peso}": round(d, 3),
+                    "calculado_sobre_muestra": es_muestra,
                 }
             )
             contador += 1
@@ -262,14 +291,31 @@ def hoja_zonas_areas(modelo: ModeloRed) -> pd.DataFrame:
     return df
 
 
-def hoja_centralidad(grafo: nx.MultiGraph) -> pd.DataFrame:
+def hoja_centralidad(
+    grafo: nx.MultiGraph, umbral_pesado: int = 3000, tamano_muestra: int = 500, semilla: int = 42
+) -> pd.DataFrame:
     if grafo.number_of_nodes() == 0:
         return pd.DataFrame()
     simple = nx.Graph(grafo)
+    n = simple.number_of_nodes()
     grado = nx.degree_centrality(simple)
-    intermediacion = nx.betweenness_centrality(simple, weight=None, normalized=True)
-    cercania = nx.closeness_centrality(simple)
-    puntos_articulacion = set(nx.articulation_points(simple)) if simple.number_of_nodes() > 2 else set()
+    # articulation_points y degree_centrality son O(V+E): siempre exactos,
+    # incluso en redes grandes.
+    puntos_articulacion = set(nx.articulation_points(simple)) if n > 2 else set()
+
+    # betweenness_centrality exacta es O(V*E): impracticable en redes de
+    # miles de barras. Por encima de "umbral_pesado" se usa la variante
+    # aproximada de networkx, que estima el resultado a partir de un
+    # muestreo de nodos origen ("k") en vez de recorrerlos todos.
+    es_aproximada = n > umbral_pesado
+    k = min(tamano_muestra, n) if es_aproximada else None
+    intermediacion = nx.betweenness_centrality(
+        simple, k=k, seed=semilla if es_aproximada else None, normalized=True
+    )
+    # closeness_centrality también es O(V*E) sin atajo de muestreo posible
+    # (necesita las distancias completas desde cada nodo); en redes grandes
+    # se omite en vez de tardar minutos u horas.
+    cercania = {} if es_aproximada else nx.closeness_centrality(simple)
 
     filas = []
     for nid, datos in simple.nodes(data=True):
@@ -279,7 +325,8 @@ def hoja_centralidad(grafo: nx.MultiGraph) -> pd.DataFrame:
                 "grado": simple.degree(nid),
                 "centralidad_grado": round(grado.get(nid, 0.0), 4),
                 "centralidad_intermediacion": round(intermediacion.get(nid, 0.0), 4),
-                "centralidad_cercania": round(cercania.get(nid, 0.0), 4),
+                "intermediacion_es_aproximada": es_aproximada,
+                "centralidad_cercania": round(cercania[nid], 4) if nid in cercania else None,
                 "punto_de_articulacion_n1": nid in puntos_articulacion,
             }
         )
@@ -290,21 +337,34 @@ def hoja_centralidad(grafo: nx.MultiGraph) -> pd.DataFrame:
 def hoja_elementos_criticos_n1(grafo: nx.MultiGraph) -> pd.DataFrame:
     """Ramas cuya sola desconexión deja incomunicadas dos barras (N-1 crítico).
 
-    Se evalúa sobre el MultiGraph real (no uno simplificado) para no marcar
-    como crítica una línea que tiene un circuito paralelo entre las mismas
-    barras.
+    Usa el algoritmo de "bridges" (O(V+E), una sola pasada) sobre una
+    versión simplificada del grafo en vez de remover cada arista una por una
+    y volver a comprobar conectividad (O(E*(V+E)): impracticable con miles
+    de elementos). Para no marcar como crítica una línea que tiene un
+    circuito paralelo entre las mismas barras, se cuenta la multiplicidad de
+    cada par de barras en el MultiGraph original y solo se reportan los
+    "bridges" cuya multiplicidad es 1.
     """
+    simple = nx.Graph()
+    simple.add_nodes_from(grafo.nodes())
+    multiplicidad: dict[frozenset, int] = {}
+    for u, v in grafo.edges(keys=False):
+        clave = frozenset((u, v))
+        multiplicidad[clave] = multiplicidad.get(clave, 0) + 1
+        simple.add_edge(u, v)
+
     filas = []
-    trabajo = grafo.copy()
-    for u, v, k, datos in list(grafo.edges(keys=True, data=True)):
-        trabajo.remove_edge(u, v, key=k)
-        sigue_conectado = trabajo.has_node(u) and trabajo.has_node(v) and nx.has_path(trabajo, u, v)
-        trabajo.add_edge(u, v, key=k, **datos)
-        if not sigue_conectado:
+    for componente in nx.connected_components(simple):
+        if len(componente) < 2:
+            continue
+        for u, v in nx.bridges(simple.subgraph(componente)):
+            if multiplicidad.get(frozenset((u, v)), 0) != 1:
+                continue  # hay una rama paralela entre u y v: no es N-1 crítico
+            clave, datos = next(iter(grafo.get_edge_data(u, v).items()))
             filas.append(
                 {
-                    "id": k,
-                    "nombre": datos.get("nombre", k),
+                    "id": clave,
+                    "nombre": datos.get("nombre", clave),
                     "tipo": datos.get("tipo"),
                     "barra_desde": grafo.nodes[u].get("nombre", u),
                     "barra_hasta": grafo.nodes[v].get("nombre", v),
@@ -315,11 +375,21 @@ def hoja_elementos_criticos_n1(grafo: nx.MultiGraph) -> pd.DataFrame:
 
 
 def hoja_correlaciones_estadisticas(
-    modelo: ModeloRed, grafo: nx.MultiGraph, peso: str
+    modelo: ModeloRed,
+    grafo: nx.MultiGraph,
+    peso: str,
+    tamano_muestra: int = 500,
+    semilla: int = 42,
 ) -> pd.DataFrame:
     """Correlación (Pearson) entre distancia geográfica, distancia eléctrica y
-    número de saltos, calculada sobre todos los pares de barras que tienen
-    coordenadas GPS y están en la misma componente conexa del grafo.
+    número de saltos, calculada sobre pares de barras que tienen coordenadas
+    GPS y están en la misma componente conexa del grafo.
+
+    No hace falta ser exhaustivo para que una correlación sea representativa,
+    así que cuando hay más de "tamano_muestra" barras con GPS se toma una
+    muestra aleatoria de ese tamaño en vez de recorrerlas todas: evita tanto
+    el costo de una ruta más corta desde cada una de miles de barras como un
+    número de pares que de todos modos sería excesivo para este propósito.
     """
     barras_geo = [b for b in modelo.barras if b.tiene_coordenadas and grafo.has_node(b.id)]
     if len(barras_geo) < 3:
@@ -327,6 +397,9 @@ def hoja_correlaciones_estadisticas(
             [["Se requieren al menos 3 barras con coordenadas GPS conectadas para calcular correlaciones."]],
             columns=["Aviso"],
         )
+    if len(barras_geo) > tamano_muestra:
+        barras_geo = random.Random(semilla).sample(barras_geo, tamano_muestra)
+    barras_por_id = {b.id: b for b in barras_geo}
 
     simple = nx.Graph()
     simple.add_nodes_from(grafo.nodes(data=True))
@@ -338,19 +411,19 @@ def hoja_correlaciones_estadisticas(
             simple.add_edge(u, v, weight=w)
 
     filas = []
-    ids = [b.id for b in barras_geo]
+    ids = list(barras_por_id.keys())
     for i, origen in enumerate(ids):
         try:
             saltos = nx.shortest_path_length(simple, origen)
             distancias = nx.shortest_path_length(simple, origen, weight="weight")
         except nx.NetworkXError:
             continue
+        b1 = barras_por_id[origen]
         for j in range(i + 1, len(ids)):
             destino = ids[j]
             if destino not in distancias:
                 continue  # distinta componente conexa
-            b1 = next(b for b in barras_geo if b.id == origen)
-            b2 = next(b for b in barras_geo if b.id == destino)
+            b2 = barras_por_id[destino]
             filas.append(
                 {
                     "distancia_geografica_km": distancia_haversine_km(b1.lat, b1.lon, b2.lat, b2.lon),
@@ -380,23 +453,30 @@ def generar_todas_las_hojas(modelo: ModeloRed, config: dict) -> dict[str, pd.Dat
     umbral = config.get("umbral_matriz_completa", 200)
     vecinos = config.get("num_vecinos_cercanos", 10)
     peso = config.get("peso_distancia_electrica", "x_ohm")
+    umbral_pesado = config.get("umbral_analisis_pesado", 3000)
+    tamano_muestra = config.get("tamano_muestra_redes_grandes", 500)
+    semilla = config.get("semilla_muestreo", 42)
 
     hojas: dict[str, pd.DataFrame] = {
         "Resumen": hoja_resumen(modelo, grafo),
         "Grafo_Electrico": hoja_grafo_electrico(modelo),
         "Niveles_Tension": hoja_niveles_tension(modelo),
         "Zonas_Areas": hoja_zonas_areas(modelo),
-        "Centralidad_Nodos": hoja_centralidad(grafo),
+        "Centralidad_Nodos": hoja_centralidad(grafo, umbral_pesado, tamano_muestra, semilla),
         "Elementos_Criticos_N1": hoja_elementos_criticos_n1(grafo),
         "Cercania_Geografica": hoja_cercania_geografica(modelo, umbral, vecinos),
-        "Correlaciones_Estadisticas": hoja_correlaciones_estadisticas(modelo, grafo, peso),
+        "Correlaciones_Estadisticas": hoja_correlaciones_estadisticas(
+            modelo, grafo, peso, tamano_muestra, semilla
+        ),
     }
 
     matriz_adyacencia = hoja_matriz_adyacencia(grafo, umbral)
     if matriz_adyacencia is not None:
         hojas["Matriz_Adyacencia"] = matriz_adyacencia
 
-    distancia_electrica = hoja_distancia_electrica(grafo, peso, umbral, vecinos)
+    distancia_electrica = hoja_distancia_electrica(
+        grafo, peso, umbral, vecinos, umbral_pesado, tamano_muestra, semilla
+    )
     if distancia_electrica is not None:
         hojas["Distancia_Electrica"] = distancia_electrica
 

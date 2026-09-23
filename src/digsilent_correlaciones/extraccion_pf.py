@@ -40,16 +40,32 @@ def _en_servicio(obj) -> bool:
         return True
 
 
+def _es_coordenada_vacia(lat, lon) -> bool:
+    """(0, 0) es el valor por defecto/sin-inicializar del campo GPS en
+    PowerFactory, no una ubicación real (Null Island) — se trata como dato
+    faltante, igual que None."""
+    if lat is None or lon is None:
+        return True
+    try:
+        return float(lat) == 0.0 and float(lon) == 0.0
+    except (TypeError, ValueError):
+        return True
+
+
 def _obtener_coordenadas(elemento, config):
     lat = _obtener_attr(elemento, config["atributos_lat"])
     lon = _obtener_attr(elemento, config["atributos_lon"])
-    if lat is None or lon is None:
+    if _es_coordenada_vacia(lat, lon):
         subestacion = getattr(elemento, "cpSubstat", None)
         if subestacion is not None:
-            lat = lat if lat is not None else _obtener_attr(subestacion, config["atributos_lat"])
-            lon = lon if lon is not None else _obtener_attr(subestacion, config["atributos_lon"])
+            lat_sub = _obtener_attr(subestacion, config["atributos_lat"])
+            lon_sub = _obtener_attr(subestacion, config["atributos_lon"])
+            if not _es_coordenada_vacia(lat_sub, lon_sub):
+                lat, lon = lat_sub, lon_sub
+    if _es_coordenada_vacia(lat, lon):
+        return (None, None)
     try:
-        return (float(lat), float(lon)) if lat is not None and lon is not None else (None, None)
+        return (float(lat), float(lon))
     except (TypeError, ValueError):
         return (None, None)
 
